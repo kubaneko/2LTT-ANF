@@ -38,7 +38,8 @@ data Program
   | CaseBool Atom Jump Jump
   -- | CaseList Atom Jump (Name, Name, Jump)
 
-data Top
-  = Empty
-  | ValDef Name ValTy Program Top
-  | FunDef Name CompTy FunExp Top
+data Def =
+  ValDef Name ValTy Program
+  | FunDef Name CompTy FunExp
+
+type Top = [Def]

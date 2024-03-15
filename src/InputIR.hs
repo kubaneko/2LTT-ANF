@@ -79,7 +79,7 @@ data Tm
   -- | CaseList Ty Tm Tm (Name, Name, Tm) -- ret ty, scrutinee, nilcase, conscase
 
   | Let Name Ty Tm Tm     -- let x : ty := def; body
-  | LetRec Name Ty Tm Tm  -- letrec
+  | LetRec Name CompTy Tm Tm  -- letrec
   deriving (Show)
 
 type Program = [(Name, Ty, Tm)]
