@@ -1,10 +1,14 @@
-{-# language Strict, LambdaCase, BlockArguments, OverloadedStrings #-}
+{-# language Strict, LambdaCase, BlockArguments, OverloadedStrings, TupleSections #-}
 {-# options_ghc -Wincomplete-patterns #-}
 
 module TransformANF where
 
 import Data.Maybe
+import qualified Data.Map.Strict as M
 import Data.List
+import Control.Monad.Trans.Class
+import Control.Monad.Trans.Reader
+import Control.Monad.Trans.State.Strict
 import Debug.Trace
 import qualified InputIR as I
 import InputIR (Ty(..), CompTy(..), ValTy(..))
@@ -46,13 +50,13 @@ data Val
   -- | CaseList Ty Tm Tm (Name, Name, Tm) -- ret ty, scrutinee, nilcase, conscase
 
   | Let Name Ty Val (Val -> Val)     -- let x : ty := def; body
-  | LetRec Name Ty (Val -> Val) (Val -> Val)  -- letrec
+  | LetRec Name CompTy (Val -> Val) (Val -> Val)  -- letrec
 
 data IR
   = ITop Name     -- top vars
   | ILocal Name   -- local var
 
-  | ILam Name ValTy IR
+  | ILam Binding Name ValTy IR
   | ISApp IR [IR]
 
   -- | Tuple [Tm]
@@ -69,8 +73,8 @@ data IR
   -- | Cons Tm Tm
   -- | CaseList Ty Tm Tm (Name, Name, Tm) -- ret ty, scrutinee, nilcase, conscase
 
-  | ILet Name Ty IR IR     -- let x : ty := def; body
-  | ILetRec Name Ty IR IR  -- letrec
+  | ILet Binding Name Ty IR IR     -- let x : ty := def; body
+  | ILetRec Binding Name CompTy IR IR  -- letrec
   | IFix Name
   deriving (Show)
 
@@ -104,8 +108,7 @@ eval e g etm = case etm of
   --  | CaseList Ty Tm Tm (Name, Name, Tm) -- ret ty, scrutinee, nilcase, conscase
 
   I.Let n t tm1 tm2 -> vlet n t (eval e g tm1) \v -> eval ((n, (v,t)):e) g tm2
-  I.LetRec n t tm1 tm2 -> vletrec n t (\v -> eval ((n, (v,t)):e) g tm1) \v -> eval ((n, (v,t)):e) g tm2
-    -- TODO is this safe?
+  I.LetRec n t tm1 tm2 -> vletrec n t (\v -> eval ((n, (v,CompTy t)):e) g tm1) \v -> eval ((n, (v,CompTy t)):e) g tm2
 
 
 unwrapTy :: Ty -> [Ty]
@@ -144,7 +147,7 @@ vapps t tss@(ty:ts) uss@(u:us) = case t of
   _          -> letBind (SApp t []) uss tss
   where
     letBind v [] _ = v
-    letBind (SApp t vals) (v:vs) (ty:ts) = vlet "" ty v \v -> letBind (SApp t (vals ++ [v])) vs ts-- TODO ugly
+    letBind (SApp t vals) (v:vs) (ty:ts) = vlet "" ty v \v -> letBind (SApp t (vals ++ [v])) vs ts
     appTy :: Ty -> Ty -> Ty
     appTy (CompTy (CTFunStop v1 v2)) _ = ValTy v2
     appTy (CompTy (CTFunMore v1 ct)) _ = CompTy ct
@@ -158,19 +161,20 @@ vlet x ty t u = case t of
   LetRec x' ty' t' u' -> vletrec x' ty' t' \x' -> vlet x ty (u' x') u
   t             -> Let x ty (etaExp ty t) u
 
-vletrec :: Name -> Ty -> (Val -> Val) -> (Val -> Val) -> Val
+vletrec :: Name -> CompTy -> (Val -> Val) -> (Val -> Val) -> Val
 vletrec x ty t u = case t (Local x) of
   Local n  | n /= x -> u (Local n)
-  Let x' ty' t' u' -> vlet x' ty' t' \x' -> vlet x ty (u' x') u
-  LetRec x' ty' t' u' -> vletrec x' ty' t' \x' -> vlet x ty (u' x') u
-  _             -> LetRec x ty (\v -> etaExp ty (t v)) u
+  Let x' ty' t' u' -> vlet x' ty' t' \x' -> vlet x (CompTy ty) (u' x') u
+  LetRec x' ty' t' u' -> vletrec x' ty' t' \x' -> vlet x (CompTy ty) (u' x') u
+  _             -> LetRec x ty (\v -> etaExp (CompTy ty) (t v)) u
 
 evalApps :: Env -> Global -> I.Tm -> [Val] ->Val
 evalApps env g t [] = eval env g t
 evalApps env g t args@(arg:argss) = case t of
    I.Lam n t tm -> vapps (Lam n t (\v -> evalApps ((n, (v,ValTy t)):env) g tm (argss))) [ValTy t] [arg]
    I.Let n t tm1 tm2 -> vlet n t (eval env g tm1) \v -> evalApps ((n, (v,t)):env) g tm2 args
-   I.LetRec n t tm1 tm2 -> vletrec n t (\v -> eval ((n, (v,t)):env) g tm1) \v -> evalApps ((n, (v,t)):env) g tm2 args
+   I.LetRec n t tm1 tm2 -> vletrec n t (\v -> eval ((n, (v,CompTy t)):env) g tm1)
+                          \v -> evalApps ((n, (v,CompTy t)):env) g tm2 args
    I.CaseBool ty _ _ _  -> vapps (eval env g t) (unwrapTy ty) args
    I.Local n     -> vapps (lookupVal n env) types args
      where
@@ -190,10 +194,10 @@ quote ns = \case
   Fix n -> IFix n
   Local x     -> ILocal x
   SApp t us   -> ISApp (quote ns t) (fmap (quote ns) us)
-  Lam x ty t   -> let x' = fresh ns x in ILam x' ty (quote (x':ns) (t (Local x')))
-  Let x ty t u -> let x' = fresh ns x in ILet x' ty (quote ns t) (quote (x':ns) (u (Local x')))
-  LetRec x ty t u -> let x' = fresh ns x in ILetRec x' ty (quote (x':ns) (t (Fix x'))) (quote (x':ns) (u (Local x')))
-
+  Lam x ty t   -> let x' = fresh ns x in ILam (Loc Unused) x' ty (quote (x':ns) (t (Local x')))
+  Let x ty t u -> let x' = fresh ns x in ILet (Loc Unused) x' ty (quote ns t) (quote (x':ns) (u (Local x')))
+  LetRec x ty t u -> let x' = fresh ns x in ILetRec (Rec Unused Unused) x' ty
+                              (quote (x':ns) (t (Fix x'))) (quote (x':ns) (u (Local x')))
   --  | Tuple [Tm]
   --  | Proj Tm Int  -- field projection for tuples
 
@@ -210,11 +214,69 @@ quote ns = \case
 
 -- transform closed terms
 transform :: Global -> (Name, Ty,  I.Tm) -> Def
-transform g (n,ty,tm) = Def n ty nms (quote nms $ (\v -> vapps v tps (fmap Local nms)) $ eval [] g tm)
+transform g (n,ty,tm) = Def n ty nms
+        (quote nms $ (\v -> vapps v tps (fmap Local nms)) $ eval [] g tm)
   where
     tps = unwrapTy ty
     nms = fmap show $ take (length tps) [1..]
 
+defaultBinding :: Binding
+defaultBinding = Loc Unused
+
+data Binding = Loc BindingType | Arg | Rec BindingType BindingType
+  deriving (Show)
+data BindingType = Tail | NTail | Unused
+  deriving (Show)
+
+type BindingM a = (ReaderT Bool (State (M.Map Name Binding)) a)
+
+getBindings :: Def -> Def
+getBindings (Def nm ty args tm) = Def nm ty args tm'
+  where
+    tm' = evalState (runReaderT (go tm) True) (M.fromList (fmap (,Arg) args))
+    go :: IR -> BindingM IR
+    go a@(ILocal n) = do
+      tail <- ask
+      lift (modify (M.insertWith mergeBindings n (Loc (bool2Bind tail))))
+      return a
+    go a@(IFix n) = do
+      tail <- ask
+      lift (modify (M.insertWith mergeBindings n (Rec Unused (bool2Bind tail))))
+      return a
+    go (ILet b n ty x f) = do
+      x' <- local (const False) (go x)
+      lift (modify (M.insertWith mergeBindings n b))
+      f' <- go f
+      b' <- lift (gets (flip (M.!) n))
+      lift (modify (M.delete n))
+      return $ ILet b' n ty x' f'
+    go (ILetRec b n ty x f) = do
+      x' <- local (const False) (go x)
+      lift (modify (M.insertWith mergeBindings n b))
+      f' <- go f
+      b'@(Rec l r) <- lift (gets (flip (M.!) n))
+      lift (modify (M.delete n))
+      return $ if r == Unused then ILet (Loc l) n ty x' f'
+               else ILetRec b' n ty x' f'
+
+
+
+
+bool2Bind :: Bool -> BindingType
+bool2Bind True = Tail
+bool2Bind False = NTail
+
+mergeBindings :: Binding -> Binding -> Binding
+mergeBindings _ Arg = Arg
+mergeBindings (Loc loc1) (Loc loc2) = Loc (mergeT loc1 loc2)
+mergeBindings (Loc loc1) (Rec loc2 rec2) = Rec (mergeT loc1 loc2) rec2
+mergeBindings (Rec l1 r1) (Rec l2 r2) = Rec (mergeT l1 l2) (mergeT r1 r2)
+
+mergeT :: BindingType -> BindingType -> BindingType
+mergeT b1 Unused = b1
+mergeT Unused b2 = b2
+mergeT Tail Tail = Tail
+mergeT _  _ = NTail
 
 -- transformProgram :: I.Program -> I.Program
 -- transformProgram p = fmap (\case (n,ty,tm) -> (n,ty, transform tyMap tm)) p
