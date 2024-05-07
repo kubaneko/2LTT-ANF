@@ -125,8 +125,10 @@ etaExp tp val = go tp []
     go t@(CompTy (CTFunMore v1 ct)) args = Lam "'" v1 (\v -> go (CompTy ct) (v:args))
 
 vcaseB :: Ty -> Val -> Val -> Val -> Val
+vcaseB tt@(ValTy VTBool) (Let x ty t v) v2 v3 = vlet x ty t \y -> vcaseB tt (v y) v2 v3
+vcaseB tt@(ValTy VTBool) (LetRec x ty t v) v2 v3 = vletrec x ty t \y -> vcaseB tt (v y) v2 v3
 vcaseB tt@(ValTy VTBool) (BoolLit b) v2 v3 = if b then v2 else v3
--- vcaseB tt@(ValTy t) (CaseBool _ v1' v2' v3') v2 v3 = vcaseB tt v1' (vcaseB tt v2' v2 v3) (vcaseB tt v3' v2 v3) -- TODO case-of-case ?
+vcaseB tt@(ValTy t) (CaseBool _ v1' v2' v3') v2 v3 = vcaseB tt v1' (vcaseB tt v2' v2 v3) (vcaseB tt v3' v2 v3) -- TODO case-of-case ?
 vcaseB tt@(ValTy t) v1 v2 v3 = vlet "" (ValTy VTBool) v1 \vc -> CaseBool tt vc (vlet "" tt v2 id) (vlet "" tt v3 id)
 vcaseB t v1 v2 v3 = CaseBool t v1 v2 v3
 
@@ -139,15 +141,15 @@ vapps t tss@(ty:ts) uss@(u:us) = case t of
     (Local _) -> vapps (f u) ts us
     (BoolLit _) -> vapps (f u) ts us
     (IntLit _) -> vapps (f u) ts us
-    _ -> letBind (SApp t []) uss tss
+    _ -> letBind (SApp t []) [u] [ValTy ty] ts us
   Let x ty t v -> vlet x ty t \y -> vapps (v y) tss uss
   LetRec x ty t v -> vletrec x ty t \y -> vapps (v y) tss uss
   CaseBool t@(CompTy _) vb vt vf -> vcaseB (foldl appTy t tss) vb (vapps vt tss uss) (vapps vf tss uss)
-  SApp _ _ -> letBind t uss tss
-  _          -> letBind (SApp t []) uss tss
+  SApp _ _ -> letBind t uss tss [] []
+  _          -> letBind (SApp t []) uss tss [] []
   where
-    letBind v [] _ = v
-    letBind (SApp t vals) (v:vs) (ty:ts) = vlet "" ty v \v -> letBind (SApp t (vals ++ [v])) vs ts
+    letBind v [] [] restv restt = vapps v restv restt
+    letBind (SApp t vals) (v:vs) (ty:ts) restv restt = vlet "" ty v \v -> letBind (SApp t (vals ++ [v])) vs ts restv restt
     appTy :: Ty -> Ty -> Ty
     appTy (CompTy (CTFunStop v1 v2)) _ = ValTy v2
     appTy (CompTy (CTFunMore v1 ct)) _ = CompTy ct
@@ -283,8 +285,8 @@ getBindings (Def nm ty args tm) = Def nm ty args tm'
       return $ ILam b' n ty f'
     go (ICaseBool ty b tt ff) = do
       b' <- go b
-      tt' <- local (const True) (go tt)
-      ff' <- local (const False) (go ff)
+      tt' <- go tt
+      ff' <- go ff
       return $ ICaseBool ty b' tt' ff'
 
 
