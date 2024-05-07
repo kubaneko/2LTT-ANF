@@ -164,7 +164,6 @@ vlet x ty t u = case t of
 vletrec :: Name -> CompTy -> (Val -> Val) -> (Val -> Val) -> Val
 vletrec x ty t u = case t (Local x) of
   Local n  | n /= x -> u (Local n)
-  LetRec x' ty' t' u' -> vletrec x' ty' t' \x' -> vlet x (CompTy ty) (u' x') u
   _             -> LetRec x ty (\v -> etaExp (CompTy ty) (t v)) u
 
 evalApps :: Env -> Global -> I.Tm -> [Val] ->Val
@@ -223,9 +222,9 @@ defaultBinding :: Binding
 defaultBinding = Loc Unused
 
 data Binding = Loc BindingType | Arg | Rec BindingType BindingType
-  deriving (Show)
+  deriving (Show, Eq)
 data BindingType = Tail | NTail | Unused
-  deriving (Show)
+  deriving (Show, Eq)
 
 type BindingM a = (ReaderT Bool (State (M.Map Name Binding)) a)
 
@@ -238,25 +237,57 @@ getBindings (Def nm ty args tm) = Def nm ty args tm'
       tail <- ask
       lift (modify (M.insertWith mergeBindings n (Loc (bool2Bind tail))))
       return a
+    go a@(ITop _) = return a
+    go a@(IBoolLit _) = return a
+    go a@(IIntLit _) = return a
+    go a@(ISApp f xs) = do
+      f' <- go f
+      xs' <- traverse go xs
+      return $ ISApp f' xs'
+    go a@(IIPlus x y) = do
+      x' <- go x
+      y' <- go y
+      return $ IIPlus x' y'
     go a@(IFix n) = do
       tail <- ask
       lift (modify (M.insertWith mergeBindings n (Rec Unused (bool2Bind tail))))
       return a
-    go (ILet b n ty x f) = do
+    go (ILet b n (ValTy _) x f) = do
       x' <- local (const False) (go x)
       lift (modify (M.insertWith mergeBindings n b))
       f' <- go f
       b' <- lift (gets (flip (M.!) n))
       lift (modify (M.delete n))
       return $ ILet b' n ty x' f'
-    go (ILetRec b n ty x f) = do
-      x' <- local (const False) (go x)
+    go (ILet b n (CompTy _) x f) = do
       lift (modify (M.insertWith mergeBindings n b))
       f' <- go f
-      b'@(Rec l r) <- lift (gets (flip (M.!) n))
+      b' <- lift (gets (flip (M.!) n))
       lift (modify (M.delete n))
-      return $ if r == Unused then ILet (Loc l) n ty x' f'
-               else ILetRec b' n ty x' f'
+      return $ ILet b' n ty x f'
+    go (ILetRec b n ty x f) = do
+      lift (modify (M.insertWith mergeBindings n b))
+      x' <- go x
+      f' <- go f
+      b' <- lift (gets (flip (M.!) n))
+      case b' of
+        (Rec l r) -> do
+            lift (modify (M.delete n))
+            return $ if r == Unused then ILet (Loc l) n (CompTy ty) x' f'
+                    else ILetRec b' n ty x' f'
+    go (ILam b n ty f) = do
+      lift (modify (M.insertWith mergeBindings n b))
+      f' <- go f
+      b' <- lift (gets (flip (M.!) n))
+      lift (modify (M.delete n))
+      return $ ILam b' n ty f'
+    go (ICaseBool ty b tt ff) = do
+      b' <- go b
+      tt' <- local (const True) (go tt)
+      ff' <- local (const False) (go ff)
+      return $ ICaseBool ty b' tt' ff'
+
+
 
 
 
