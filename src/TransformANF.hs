@@ -164,7 +164,6 @@ vlet x ty t u = case t of
 vletrec :: Name -> CompTy -> (Val -> Val) -> (Val -> Val) -> Val
 vletrec x ty t u = case t (Local x) of
   Local n  | n /= x -> u (Local n)
-  Let x' ty' t' u' -> vlet x' ty' t' \x' -> vlet x (CompTy ty) (u' x') u
   LetRec x' ty' t' u' -> vletrec x' ty' t' \x' -> vlet x (CompTy ty) (u' x') u
   _             -> LetRec x ty (\v -> etaExp (CompTy ty) (t v)) u
 
